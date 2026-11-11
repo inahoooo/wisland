@@ -253,7 +253,8 @@ class MediaService(QtCore.QObject):
 
         info = s.get_playback_info()
         playing = bool(info and int(info.playback_status) == _PLAYING)
-        can_prev = can_next = False
+        # None = 播放器没报控制能力（大多数会话），仍允许点；False = 明确不可用
+        can_prev = can_next = None
         if info and info.controls:
             can_prev = bool(info.controls.is_previous_enabled)
             can_next = bool(info.controls.is_next_enabled)

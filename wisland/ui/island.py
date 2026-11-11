@@ -212,6 +212,8 @@ class Island(QtWidgets.QWidget):
     mode_changed = QtCore.Signal(str)
 
     play_pause_requested = QtCore.Signal()      # 收起态音乐视图的播放 / 暂停键
+    prev_requested = QtCore.Signal()            # 收起态音乐视图的上一首
+    next_requested = QtCore.Signal()            # 收起态音乐视图的下一首
 
     def __init__(self, pages: list, peak_fn=None):
         super().__init__(None, Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool
@@ -1063,13 +1065,16 @@ class Island(QtWidgets.QWidget):
             elif self.poke.target != 0.0:
                 self.poke.to(0.0, 300, 0.22)          # 欠阻尼：弹回时会外鼓几下
                 self._kick()
-        on_btn = inside and self._on_play_button(QtCore.QPointF(QtGui.QCursor.pos()) - QtCore.QPointF(self._win_origin))
-        hv = 1.0 if on_btn and not self.passthrough() else 0.0
-        if abs(self.compact.play_hover - hv) > 0.01:
-            self.compact.play_hover += (hv - self.compact.play_hover) * 0.5
+        on_btn = self._button_at(QtCore.QPointF(QtGui.QCursor.pos()) - QtCore.QPointF(self._win_origin)) if inside else ""
+        if self.passthrough():
+            on_btn = ""
+        hv = 1.0 if on_btn else 0.0
+        self.compact.hover_btn = on_btn
+        if abs(self.compact.btn_hover - hv) > 0.01:
+            self.compact.btn_hover += (hv - self.compact.btn_hover) * 0.5
             self._kick()
         if on_btn and not self.expanded:
-            self._hover_since = None              # 在播放键上停留不展开
+            self._hover_since = None              # 停在控制键上不展开
             return
         if inside and self.passthrough():
             inside = False                        # 可穿透：鼠标视为不在灵动岛上（只响应右键）
@@ -1113,18 +1118,35 @@ class Island(QtWidgets.QWidget):
             self._press = None
             self.begin_drag(QtGui.QCursor.pos())
 
-    def _on_play_button(self, local: QtCore.QPointF) -> bool:
-        r = self.compact.play_rect
-        return (r is not None and not self.expanded and self.compact.mode() == "media"
-                and r.adjusted(-6, -8, 6, 8).contains(local))
+    def _button_at(self, local: QtCore.QPointF, any_state: bool = False) -> str:
+        """收起态音乐视图里光标 / 点击命中的键名：prev / play / next，"" 表示不在键上。
+        any_state=True 时置灰的键也算（用于把键区从「空白区」排除，点灰键不会展开灵动岛）。"""
+        if self.expanded or self.compact.mode() != "media":
+            return ""
+        return self.compact.btn_at(local, any_state)
+
+    def _emit_button(self, name: str):
+        if name == "prev":
+            self.prev_requested.emit()
+        elif name == "next":
+            self.next_requested.emit()
+        elif name == "play":
+            self.play_pause_requested.emit()
 
     def mouseReleaseEvent(self, e):
         self.lp_timer.stop()
-        if self._press is not None and self._on_play_button(e.position()) and self._on_play_button(self._press):
-            self._press = None
-            self.play_pause_requested.emit()
-            return
-        if self._press is not None and self.mode == "anchored" and not self.expanded \
+        press = self._press
+        if press is not None:
+            # 键区一律吞掉：即使键被置灰，也不让这次点击变成「点空白 -> 展开 / 切换长关」
+            zone = self._button_at(e.position(), any_state=True)
+            if zone:
+                self._press = None
+                # 按下与松开必须在同一个可用键上，才是有效点击
+                hit = self._button_at(e.position())
+                if hit == zone and hit == self._button_at(press):
+                    self._emit_button(hit)
+                return
+        if press is not None and self.mode == "anchored" and not self.expanded \
                 and self.expand_mode() != "never":
             self._click_timer.start(QtWidgets.QApplication.doubleClickInterval())
         self._press = None
@@ -1136,9 +1158,13 @@ class Island(QtWidgets.QWidget):
             QtCore.QTimer.singleShot(600, lambda: self.locks.discard("pin"))
 
     def mouseDoubleClickEvent(self, e):
-        if e.button() == Qt.MouseButton.LeftButton and self._on_play_button(e.position()):
-            self.play_pause_requested.emit()       # 快速连点播放键：当作第二次点击，不切换长关
-            return
+        if e.button() == Qt.MouseButton.LeftButton:
+            hit = self._button_at(e.position())
+            if self._button_at(e.position(), any_state=True):
+                # 连点控制键（含被置灰的）：当第二次点击处理，不切换长关
+                if hit:
+                    self._emit_button(hit)
+                return
         if e.button() == Qt.MouseButton.LeftButton and self._inside(e.globalPosition().toPoint()):
             self._click_timer.stop()
             self._press = None

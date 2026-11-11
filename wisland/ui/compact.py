@@ -21,6 +21,12 @@ H_ACT = 40
 H_SUB = 60          # 实时字幕：上日语、下中文两行
 SUB_HOLD_S = 7.0    # 最后一句字幕之后保留多久再回到原来的视图
 W_TEXT = 640        # 显示歌词 / 实时字幕时的胶囊宽度（约为普通收起态的 3 倍）
+# 收起态音乐视图右侧的三个控制键：上一首 / 播放-暂停 / 下一首
+BTN_ORDER = ("prev", "play", "next")
+BTN_W = 26          # 上一首 / 下一首的宽度
+PLAY_W = 28         # 播放 / 暂停键宽一点
+BTN_SP = 6          # 键与键之间的间隙（热区左右各外扩 2，仍留 2 像素不重叠）
+BTN_SPACE = (BTN_W + BTN_SP) * 2   # 多出来的两个键占用的宽度（加在胶囊长度上）
 
 
 class PetFace:
@@ -307,9 +313,10 @@ class CompactView:
         self.sub_jp = ""
         self.sub_zh = ""
         self.sub_t = -100.0
-        # 收起态音乐视图右侧的播放 / 暂停键（灵动岛坐标，绘制时更新）
-        self.play_rect: QtCore.QRectF | None = None
-        self.play_hover = 0.0
+        # 收起态音乐视图右侧的三个控制键（灵动岛坐标，绘制时更新）
+        self.btn_rects: dict[str, QtCore.QRectF] = {}
+        self.btn_hover = 0.0
+        self.hover_btn = ""
 
     # --- 数据 ---
     def set_media(self, m: dict):
@@ -384,6 +391,24 @@ class CompactView:
     def playing(self) -> bool:
         return bool(self.media.get("has_session") and self.media.get("playing") and self.media.get("title"))
 
+    def btn_enabled(self, name: str) -> bool:
+        """上一首 / 下一首是否可用。
+        播放器没上报控制能力（None）时按可用处理，只有明确报告不可用（False）才置灰并忽略点击。"""
+        if name == "prev":
+            return self.media.get("can_prev") is not False
+        if name == "next":
+            return self.media.get("can_next") is not False
+        return True
+
+    def btn_at(self, local: QtCore.QPointF, any_state: bool = False) -> str:
+        """收起态音乐视图里命中的键名（"" = 不在任何键上）。
+        any_state=True 时连置灰（不可用）的键也算命中——用来把整个键区从「空白区」里排除，
+        避免点灰键被当成点空白而展开灵动岛 / 切换长关。"""
+        for name, r in self.btn_rects.items():
+            if (any_state or self.btn_enabled(name)) and r.adjusted(-2, -6, 2, 6).contains(local):
+                return name
+        return ""
+
     def mode(self) -> str:
         now = time.monotonic()
         if self.activity and now < self.activity["until"]:
@@ -418,9 +443,10 @@ class CompactView:
         if m == "subtitle":
             return W_TEXT + nb * 12, H_SUB                        # 固定宽度：说话时不会一直伸缩
         if m == "media":
-            if not self.playing() and not self.media.get("title"):
+            if not self.media.get("title"):
                 return 190 + nb * 12, H_MEDIA
-            return max(300, self._lyr_w) + 34 + nb * 12, H_MEDIA
+            # 右侧三个键（上一首 / 播放-暂停 / 下一首）比原来的单键多占 BTN_SPACE
+            return max(300, self._lyr_w) + 34 + BTN_SPACE + nb * 12, H_MEDIA
         if m == "pet":
             return 150 + nb * 14, H_IDLE
         w = 150 + (64 if self.weather else 0) + nb * 14
@@ -437,7 +463,7 @@ class CompactView:
         p.save()
         p.setClipRect(r.adjusted(6, 0, -6, 0), Qt.ClipOperation.IntersectClip)
         if m != "media":
-            self.play_rect = None
+            self.btn_rects = {}
         if m == "activity":
             self._paint_activity(p, r, a)
         elif m == "subtitle":
@@ -503,6 +529,7 @@ class CompactView:
         return 12 + 12 * sum(1 for v in self.badges.values() if v)
 
     def _paint_no_media(self, p, r, a):
+        self.btn_rects = {}          # 没有歌时不显示 / 不响应控制键
         cy = r.center().y()
         p.setFont(icon_font(14))
         p.setPen(theme.text(0.75 * a))
@@ -583,22 +610,35 @@ class CompactView:
             p.setPen(theme.text(0.8))
             p.drawText(cr, Qt.AlignmentFlag.AlignCenter, G.MUSIC)
         p.setOpacity(1.0)
-        # 最右侧：播放 / 暂停键（收起时也能直接点）；左边是音频律动条（跟随系统输出峰值）
+        # 最右侧：上一首 / 播放-暂停 / 下一首（收起时也能直接点）；左边是音频律动条（跟随系统输出峰值）
         right = self._badges(p, r.right() - 14, cy, a) - 4 if any(self.badges.values()) else r.right() - 8
-        pr = QtCore.QRectF(right - 28, cy - 14, 28, 28)
-        self.play_rect = pr
-        hov = self.play_hover
-        if hov > 0.01:
-            p.setPen(Qt.PenStyle.NoPen)
-            p.setBrush(theme.hover() if hasattr(theme, "hover") else theme.card(1.2))
-            p.setOpacity(a * hov)
-            p.drawEllipse(pr.adjusted(1, 1, -1, -1))
-            p.setOpacity(1.0)
-        p.setFont(icon_font(14))
-        p.setPen(theme.text(a))
-        p.drawText(pr, Qt.AlignmentFlag.AlignCenter, G.PAUSE if self.media.get("playing") else G.PLAY)
+        widths = {"prev": BTN_W, "play": PLAY_W, "next": BTN_W}
+        rects: dict[str, QtCore.QRectF] = {}
+        xr = right
+        for name in reversed(BTN_ORDER):                  # 从右往左排：下一首在最边上
+            w = widths[name]
+            rects[name] = QtCore.QRectF(xr - w, cy - 14, w, 28)
+            xr -= w + BTN_SP
+        self.btn_rects = rects
+        hovered = self.hover_btn if self.btn_hover > 0.01 else ""
+        for name in BTN_ORDER:
+            br = rects[name]
+            hov = self.btn_hover if name == hovered else 0.0
+            if hov > 0.01:
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(theme.hover() if hasattr(theme, "hover") else theme.card(1.2))
+                p.setOpacity(a * hov)
+                p.drawEllipse(br.adjusted(1, 1, -1, -1))
+                p.setOpacity(1.0)
+            glyph = {"prev": G.PREV, "next": G.NEXT}.get(name)
+            glyph = glyph or (G.PAUSE if self.media.get("playing") else G.PLAY)
+            enabled = self.btn_enabled(name)
+            p.setFont(icon_font(14 if name == "play" else 13))
+            fade = a if (enabled or name == "play") else a * 0.32
+            p.setPen(theme.text(fade))
+            p.drawText(br, Qt.AlignmentFlag.AlignCenter, glyph)
         bars_w = 26
-        bx = pr.left() - 6 - bars_w
+        bx = rects["prev"].left() - 6 - bars_w
         t = time.monotonic()
         pk = clamp(self._peak * 1.6, 0, 1)
         for i in range(4):

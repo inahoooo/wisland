@@ -350,6 +350,8 @@ def main():
     ctx.live.final_zh.connect(on_zh)
     ctx.live.running_changed.connect(on_running)
     island.play_pause_requested.connect(lambda: ctx.media.play_pause())
+    island.prev_requested.connect(lambda: ctx.media.prev())
+    island.next_requested.connect(lambda: ctx.media.next())
     ctx.learn.notice.connect(lambda t: island.activity({"glyph": _G().CHECK, "title": t}, 2.6))
     ctx.live.error.connect(lambda m: island.activity({"glyph": G.LIVE, "title": "实时字幕", "sub": m}, 4))
 
