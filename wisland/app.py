@@ -375,6 +375,7 @@ def main():
         island.activity({"glyph": G.CHECK, "title": "配置已重新加载"}, 1.8)
 
     def build_menu(menu: QtWidgets.QMenu):
+        menu.setToolTipsVisible(True)
         menu.addAction("编辑配置 config.json").triggered.connect(lambda: os.startfile(str(CONFIG_PATH)))  # noqa: S606
         menu.addAction("重新加载配置").triggered.connect(reload_cfg)
         tm = menu.addMenu("主题")
@@ -389,6 +390,9 @@ def main():
         a.triggered.connect(lambda: island.set_passthrough(not island.passthrough()))
         a = menu.addAction(("✓  " if island.capture_visible() else "    ") + "参与截图")
         a.triggered.connect(lambda: island.set_capture_visible(not island.capture_visible()))
+        a = menu.addAction(("✓  " if island.obs_capturable() else "    ") + "OBS 采集")
+        a.triggered.connect(lambda: island.set_obs_capturable(not island.obs_capturable()))
+        a.setToolTip("打开后 OBS 的「窗口采集」才能选到 wisland（要在 OBS 里重新选一次源）")
         a = menu.addAction(("✓  " if autostart_enabled() else "    ") + "开机自启")
         a.triggered.connect(lambda: set_autostart(not autostart_enabled()))
         menu.addAction("打开数据目录").triggered.connect(lambda: os.startfile(str(DATA_DIR)))  # noqa: S606

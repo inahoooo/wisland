@@ -25,6 +25,7 @@ DEFAULTS: dict = {
         "hover_expand_ms": 120,
         "collapse_delay_ms": 320,
         "exclude_from_capture": False,  # False = 灵动岛出现在截图 / 录屏里（取背景时只临时排除自己）
+        "obs_capturable": False,    # True = 去掉 WS_EX_TOOLWINDOW，OBS 的「窗口采集」才能枚举到它
         "blur_fps": 8,
         "scale": 1.0,
         "default_tab": "home",

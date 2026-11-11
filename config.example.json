@@ -8,6 +8,7 @@
     "hover_expand_ms": 120,
     "collapse_delay_ms": 320,
     "exclude_from_capture": false,
+    "obs_capturable": false,
     "blur_fps": 8,
     "scale": 1.0,
     "default_tab": "home",

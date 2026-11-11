@@ -41,8 +41,10 @@ JOIN = 30.0                      # 靠近到这个距离时液桥伸出
 EDGE_MARGIN = 6
 
 GWL_EXSTYLE = -20
+GWL_HWNDPARENT = -8               # 其实是 owner（SetWindowLongPtr 的第 -8 项就是 owner，不是 parent）
 WS_EX_NOACTIVATE = 0x08000000
 WS_EX_TRANSPARENT = 0x00000020
+WS_EX_TOOLWINDOW = 0x00000080
 WM_HOTKEY = 0x0312
 HSHELL_FLASH = 0x8006
 MOD = {"alt": 0x1, "ctrl": 0x2, "control": 0x2, "shift": 0x4, "win": 0x8}
@@ -56,6 +58,16 @@ user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintyp
 user32.GetWindowThreadProcessId.restype = wintypes.DWORD
 user32.GetForegroundWindow.restype = wintypes.HWND
 user32.RegisterWindowMessageW.restype = wintypes.UINT
+user32.CreateWindowExW.restype = wintypes.HWND
+user32.CreateWindowExW.argtypes = [wintypes.DWORD, wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.DWORD,
+                                   ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+                                   wintypes.HWND, wintypes.HMENU, wintypes.HINSTANCE, ctypes.c_void_p]
+user32.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int,
+                                ctypes.c_int, ctypes.c_int, wintypes.UINT]
+
+HWND_TOPMOST = wintypes.HWND(-1)
+SWP_NOSIZE, SWP_NOMOVE, SWP_NOACTIVATE = 0x0001, 0x0002, 0x0010
+WS_POPUP = 0x80000000
 
 
 def parse_hotkey(s: str) -> tuple[int, int] | None:
@@ -264,6 +276,7 @@ class Island(QtWidgets.QWidget):
         self._prev_fg = None
         self._registered_hotkeys: dict[int, str] = {}
         self._rhook = _RightClickHook(self)
+        self._obs_owner = 0                       # 供 OBS 枚举的隐藏 owner 窗口（见 _make_owner）
         self._mask_rect = None
         self._floor_t: dict = {}
         self.poke = Spring(0, 380, 0.55, 0.004)
@@ -928,7 +941,7 @@ class Island(QtWidgets.QWidget):
         else:
             fps = max(2.0, float(cfg.get("island.blur_fps", 10)))
             interval = 1 / (fps if self.expanded else min(fps, 3.0))   # 收起静止时身后画面变化不敏感
-            if self.capture_visible():
+            if self.backdrop.self_exclude:
                 # 参与截图时，每次取背景都要临时把自己排除约 17ms：静止时降低频率，
                 # 让截图 / 录屏几乎总能拍到灵动岛（动画、拖动时仍高频刷新）
                 interval = 1 / (1.5 if self.expanded else 1.0)
@@ -1207,6 +1220,9 @@ class Island(QtWidgets.QWidget):
         else:
             self._rhook.remove()
 
+    def obs_capturable(self) -> bool:
+        return bool(cfg.get("island.obs_capturable", False))
+
     def capture_visible(self) -> bool:
         return not bool(cfg.get("island.exclude_from_capture", False))
 
@@ -1214,11 +1230,61 @@ class Island(QtWidgets.QWidget):
         cfg.set("island.exclude_from_capture", not on)
         self.apply_capture_mode()
 
+    def set_obs_capturable(self, on: bool):
+        cfg.set("island.obs_capturable", bool(on))
+        if on:
+            # OBS 要能采到，窗口就不能常驻 WDA_EXCLUDEFROMCAPTURE；
+            # 顺手把「参与截图」也打开，两个开关保持一致，菜单上不会出现互相矛盾的勾选
+            cfg.set("island.exclude_from_capture", False, save=False)
+        self.apply_capture_mode()
+
+    def _make_owner(self) -> int:
+        """建一个永不显示的 STATIC 窗口当 owner。
+        owner 窗口不进任务栏 / Alt+Tab（和 WS_EX_TOOLWINDOW 效果一样），但不像 TOOLWINDOW
+        那样被 OBS 的窗口枚举过滤掉 —— OBS 的 check_window_valid() 见到 WS_EX_TOOLWINDOW 直接跳过。"""
+        if self._obs_owner and user32.IsWindow(self._obs_owner):
+            return self._obs_owner
+        self._obs_owner = user32.CreateWindowExW(
+            0, "STATIC", "wisland-owner", WS_POPUP,
+            0, 0, 0, 0, None, None, None, None) or 0
+        return self._obs_owner
+
+    def _set_obs_capturable(self, on: bool):
+        """开：挂隐藏 owner + 去掉 WS_EX_TOOLWINDOW，OBS 才枚举得到；
+        关：还原成 TOOLWINDOW + 无 owner。两种状态都不进任务栏 / Alt+Tab。"""
+        hwnd = int(self.winId())
+        if on:
+            owner = self._make_owner()
+            if owner:
+                user32.SetWindowLongPtrW(hwnd, GWL_HWNDPARENT, owner)
+            ex = user32.GetWindowLongPtrW(hwnd, GWL_EXSTYLE)
+            user32.SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex & ~WS_EX_TOOLWINDOW)
+            # 换 owner / 改 exstyle 之后要重新声明置顶，否则会被别的最上层窗口盖住
+            user32.SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0,
+                                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE)
+        else:
+            user32.SetWindowLongPtrW(hwnd, GWL_HWNDPARENT, 0)
+            ex = user32.GetWindowLongPtrW(hwnd, GWL_EXSTYLE)
+            user32.SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex | WS_EX_TOOLWINDOW)
+            user32.SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0,
+                                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE)
+        # 改 exstyle 会丢掉 WS_EX_LAYERED 的某些状态，把穿透重新应用一遍
+        self._apply_passthrough()
+
     def apply_capture_mode(self):
         """参与屏幕捕获：截图 / 录屏里能看到灵动岛；毛玻璃取背景时只在那一瞬间临时排除自己。
-        不参与：一直排除（截图里看不到灵动岛）。"""
+        不参与：一直排除（截图里看不到灵动岛）。
+        OBS 可采集：额外去掉 WS_EX_TOOLWINDOW（OBS 的窗口列表会过滤掉带这个位的窗口）。
+
+        三种情况都要让毛玻璃能正常取背景：截图和 OBS 采集都要求窗口「几乎总是可被采集」，
+        所以取背景只能瞬时排除自己（见 Backdrop._capture）。实测这种瞬时排除不会打断
+        OBS 的 WGC 帧流。"""
         hwnd = int(self.winId())
-        visible = self.capture_visible()
+        want_obs = self.obs_capturable()
+        self._set_obs_capturable(want_obs)
+        # WDA_EXCLUDEFROMCAPTURE 一旦常驻，OBS 的 WGC 采集就永远等不到帧（实测：设上之后
+        # 一帧都没有），所以「OBS 采集」必须压过「不参与截图」
+        visible = self.capture_visible() or want_obs
         exclude_from_capture(hwnd, not visible)
         self.backdrop.hwnd = hwnd
         self.backdrop.self_exclude = visible
