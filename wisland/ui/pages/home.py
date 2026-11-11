@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""主页（正在播放 + 快捷操作 + 自定义启动器）与消息页（QQ / 微信 / 邮件提醒）。"""
+"""主页（正在播放 + 快捷操作 + 自定义启动器）与消息页（Agent / QQ / 微信 / 邮件提醒）。"""
 from __future__ import annotations
 
 import os
@@ -591,9 +591,17 @@ class HistoryList(QtWidgets.QWidget, Themed):
             p.drawEllipse(QtCore.QPointF(10, y + 15), 4, 4)
             p.setFont(ui_font(12.5, W.Medium))
             p.setPen(theme.text())
-            p.drawText(QtCore.QRectF(24, y, 80, 30), Qt.AlignmentFlag.AlignVCenter, r.get("name", ""))
+            # 名字列固定 80px（描述从 100 开始），Agent 的 name 是会话标题、可能很长，必须省略
+            name = QtGui.QFontMetrics(p.font()).elidedText(
+                r.get("name", ""), Qt.TextElideMode.ElideRight, 74)
+            p.drawText(QtCore.QRectF(24, y, 80, 30), Qt.AlignmentFlag.AlignVCenter, name)
             kind = r.get("kind")
-            desc = "新邮件" if kind == "mail" else (f"{r['sender']} 发来消息" if r.get("sender") else "新消息")
+            if kind == "agent":
+                desc = r.get("detail") or "任务完成"
+            elif kind == "mail":
+                desc = "新邮件"
+            else:
+                desc = f"{r['sender']} 发来消息" if r.get("sender") else "新消息"
             p.setFont(ui_font(12.5))
             p.setPen(theme.text2())
             p.drawText(QtCore.QRectF(100, y, self.width() - 170, 30), Qt.AlignmentFlag.AlignVCenter,
@@ -610,6 +618,7 @@ class MessagesPage(Page):
     def __init__(self, ctx):
         super().__init__(ctx)
         self.tiles = {
+            "agent": AppTile("agent", "Agent", G.AGENT),
             "qq": AppTile("qq", "QQ", G.CHAT),
             "wechat": AppTile("wechat", "微信", G.MESSAGE),
             "mail": AppTile("mail", "邮件", G.MAIL),

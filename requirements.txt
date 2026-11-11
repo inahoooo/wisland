@@ -12,6 +12,8 @@ winrt-Windows.Foundation.Collections
 winrt-Windows.Storage.Streams
 winrt-Windows.Devices.Radios
 winrt-Windows.Devices.Bluetooth
+# Agent 提醒：解 DeepSeek Harness 的 zstd 分帧会话日志
+zstandard>=0.22,<1
 # live Japanese subtitles (speech recognition)
 numpy>=1.26,<3
 SoundCard>=0.4,<1

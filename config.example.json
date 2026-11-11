@@ -73,8 +73,20 @@
     "open": {
       "qq": "",
       "wechat": "",
-      "mail": ""
+      "mail": "",
+      "agent": ""
     }
+  },
+  "agent": {
+    "enabled": true,
+    "sessions_dir": "%USERPROFILE%/.dsh/sessions",
+    "exe": "",
+    "interval_s": 2,
+    "notify_done": true,
+    "notify_approval": true,
+    "notify_error": true,
+    "skip_foreground": true,
+    "only_cwds": []
   },
   "stocks": {
     "watchlist": [

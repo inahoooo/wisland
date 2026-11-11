@@ -27,6 +27,8 @@ BTN_W = 26          # 上一首 / 下一首的宽度
 PLAY_W = 28         # 播放 / 暂停键宽一点
 BTN_SP = 6          # 键与键之间的间隙（热区左右各外扩 2，仍留 2 像素不重叠）
 BTN_SPACE = (BTN_W + BTN_SP) * 2   # 多出来的两个键占用的宽度（加在胶囊长度上）
+# 收起态右侧的未读小圆点，从右往左排（agent 最靠内，和消息页磁贴顺序呼应）
+BADGE_KINDS = ("agent", "mail", "wechat", "qq")
 
 
 class PetFace:
@@ -562,7 +564,7 @@ class CompactView:
 
     def _badges(self, p, right: float, cy: float, a: float) -> float:
         x = right
-        for kind in ("mail", "wechat", "qq"):
+        for kind in BADGE_KINDS:
             if self.badges.get(kind):
                 c = QtGui.QColor(KIND_COLORS.get(kind, KIND_COLORS["other"]))
                 c.setAlphaF(a)

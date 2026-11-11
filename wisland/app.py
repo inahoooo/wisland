@@ -128,6 +128,7 @@ def main():
     from .services.mailcheck import MailCheckService
     from .services.media import MediaService
     from .services.notify import NotifyService
+    from .services.agentwatch import AgentWatchService
     from .services.stocks import StockService
     from .services.system import RadioService, WindowService
     from .services.lyrics import LyricsService
@@ -149,6 +150,7 @@ def main():
     ctx.radio = RadioService()
     ctx.windows = WindowService()
     ctx.notify = NotifyService()
+    ctx.agentwatch = AgentWatchService()
     ctx.stocks = StockService()
     ctx.weather = WeatherService()
     ctx.clash = ClashService()
@@ -162,6 +164,8 @@ def main():
     ctx.learn = LearnService()
     ctx.actions = Actions(ctx)
     ctx.notify.opener = lambda path: ctx.windows.open_or_focus(path)
+    ctx.notify.agent_opener = ctx.agentwatch.open
+    ctx.agentwatch.opener = ctx.notify.opener
     ctx.windows.notice.connect(lambda t: ctx.island and ctx.island.activity({"glyph": _G().MESSAGE, "title": t}, 5.0))
     ctx.island = None
 
@@ -277,12 +281,17 @@ def main():
     # ---------------- 消息提醒 ----------------
     def on_notified(n):
         kind = n.get("kind", "other")
-        glyph = {"mail": G.MAIL, "qq": G.CHAT, "wechat": G.MESSAGE}.get(kind, G.BELL)
-        sub = "新邮件" if kind == "mail" else (n.get("sender") or "新消息")
-        compact.pet.react("surprise")
-        P["home"].pet.face.react("surprise")
-        island.activity({"glyph": glyph, "color": KIND_COLORS.get(kind, KIND_COLORS["other"]),
-                         "title": n.get("name", kind), "sub": sub}, 4.0)
+        glyph = {"mail": G.MAIL, "qq": G.CHAT, "wechat": G.MESSAGE,
+                 "agent": G.AGENT}.get(kind, G.BELL)
+        if kind == "agent":
+            sub = n.get("detail") or "任务完成"
+        else:
+            sub = "新邮件" if kind == "mail" else (n.get("sender") or "新消息")
+        if not n.get("quiet"):                       # Agent 会话在前台时不打扰
+            compact.pet.react("surprise")
+            P["home"].pet.face.react("surprise")
+            island.activity({"glyph": glyph, "color": KIND_COLORS.get(kind, KIND_COLORS["other"]),
+                             "title": n.get("name", kind), "sub": sub}, 4.0)
         if P["msg"].active:
             P["msg"].refresh()
 
@@ -295,8 +304,10 @@ def main():
     ctx.notify.notified.connect(on_notified)
     ctx.notify.counts_changed.connect(on_counts)
     island.flash.connect(ctx.notify.on_flash)
-    ctx.mailcheck.new_mail.connect(lambda user, n: ctx.notify._emit(
+    ctx.mailcheck.new_mail.connect(lambda user, n: ctx.notify.emit_external(
         {"kind": "mail", "name": "邮件", "source": "imap", "time": time.time()}))
+    # ---------------- Agent 提醒（DSH 会话日志） ----------------
+    ctx.agentwatch.event.connect(ctx.notify.emit_external)
 
     # ---------------- 股票 ----------------
     ctx.stocks.updated.connect(P["stock"].set_data)
@@ -485,7 +496,8 @@ def main():
     # ---------------- 启动 ----------------
     island.show()
     for s in (ctx.media, ctx.audio, ctx.brightness, ctx.radio, ctx.windows, ctx.notify, ctx.stocks,
-              ctx.weather, ctx.clash, ctx.translate, ctx.clipboard, ctx.mailcheck, ctx.learn):
+              ctx.weather, ctx.clash, ctx.translate, ctx.clipboard, ctx.mailcheck, ctx.learn,
+              ctx.agentwatch):
         try:
             if hasattr(s, "start"):
                 s.start()
@@ -496,7 +508,8 @@ def main():
     def shutdown():
         ctx.live.stop(wait=True)
         for s in (ctx.media, ctx.audio, ctx.brightness, ctx.radio, ctx.notify, ctx.stocks,
-                  ctx.weather, ctx.clash, ctx.translate, ctx.clipboard, ctx.mailcheck, ctx.learn):
+                  ctx.weather, ctx.clash, ctx.translate, ctx.clipboard, ctx.mailcheck, ctx.learn,
+                  ctx.agentwatch):
             try:
                 s.stop()
             except Exception:  # noqa: BLE001

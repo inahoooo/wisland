@@ -195,6 +195,12 @@ class NotifyService(QtCore.QObject):
             self.counts_changed.emit(dict(self.counts))
 
     def open(self, kind: str):
+        if kind == "agent":                            # Agent 不是外部程序，交给监听服务
+            hook = getattr(self, "agent_opener", None)
+            if hook is not None:
+                hook()
+            self.clear(kind)
+            return
         path = cfg.get(f"notify.open.{kind}") or next(
             (exe for exe, m in (cfg.get("notify.flash_processes") or {}).items() if m.get("kind") == kind), "")
         if path:
@@ -204,6 +210,17 @@ class NotifyService(QtCore.QObject):
             else:
                 launch(expand(path))
         self.clear(kind)
+
+    def emit_external(self, d: dict):
+        """给其它服务（如 AgentWatchService）用的公开入口，等价于内部 _emit。"""
+        self._emit(d)
+
+    def settle(self, kind: str):
+        """事件已消解（例如审批答复完）：计数减一，不新增历史。"""
+        n = self.counts.get(kind, 0)
+        if n > 0:
+            self.counts[kind] = n - 1
+            self.counts_changed.emit(dict(self.counts))
 
     def on_flash(self, hwnd: int):
         try:
@@ -224,6 +241,9 @@ class NotifyService(QtCore.QObject):
     # ---------- internal ----------
     def _emit(self, d: dict):
         kind = d["kind"]
+        if d.get("status") == "approval-cleared":      # 审批已答复：撤销对应计数，不留残影
+            self.settle(kind)
+            return
         self._last_by_kind[kind] = time.time()
         if kind == "mail":
             d.pop("sender", None)

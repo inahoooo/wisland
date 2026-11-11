@@ -60,6 +60,7 @@ class G:
     EYE_OFF = "\uED1A"
     SEARCH = "\uE721"
     LIVE = "\uE720"   # 麦克风
+    AGENT = "\uE99A"  # 机器人：Agent 提醒
 
 
 def ui_font(px: float, weight: QtGui.QFont.Weight = QtGui.QFont.Weight.Normal, num: bool = False) -> QtGui.QFont:
@@ -266,6 +267,7 @@ KIND_COLORS = {
     "qq": QtGui.QColor("#12b7f5"),
     "wechat": QtGui.QColor("#07c160"),
     "mail": QtGui.QColor("#ff9f0a"),
+    "agent": QtGui.QColor("#4f8cff"),   # 与托盘图标同色
     "stock": QtGui.QColor("#ff5a52"),
     "other": QtGui.QColor("#8e8e93"),
 }

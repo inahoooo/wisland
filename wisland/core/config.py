@@ -67,6 +67,18 @@ DEFAULTS: dict = {
             "mail": "",        # 例：C:/Program Files/Mozilla Thunderbird/thunderbird.exe
         },
     },
+    "agent": {
+        # DeepSeek Harness 会话提醒：读 ~/.dsh/sessions 下的会话日志（见 services/agentwatch.py）
+        "enabled": True,
+        "sessions_dir": "%USERPROFILE%/.dsh/sessions",
+        "exe": "",                   # DSH 可执行文件；留空 = 点磁贴不动作
+        "interval_s": 2,
+        "notify_done": True,         # 任务完成（goal 自动续跑会每轮响，嫌吵可关）
+        "notify_approval": True,     # 等待授权批准
+        "notify_error": True,        # 出错 / 中止 / 中断
+        "skip_foreground": True,     # DSH 正在前台时只计数、不弹提醒
+        "only_cwds": [],             # 空 = 所有会话；填则按 cwd 前缀过滤，如 ["D:/wisland"]
+    },
     "stocks": {
         # 自选（腾讯财经代码：sh/sz/bj + 6 位，hk + 5 位，us + 代码）；也可在股票页点 + 搜索添加、右键删除
         "watchlist": ["sh000001", "sz399001", "sz399006", "hk00700", "usAAPL", "usNVDA", "usQQQ"],
