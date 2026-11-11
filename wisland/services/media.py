@@ -65,6 +65,22 @@ def friendly_name(app_id: str) -> str:
     return s or "媒体"
 
 
+_NCM_ID = "NCM-"   # InfLink / InfLink-rs 把网易云歌曲 id 写进 SMTC 的「流派」字段
+
+
+def _song_id(props) -> str:
+    """从 SMTC 的 genres 里取网易云歌曲 id（格式 NCM-{id}）；其它播放器返回 ""。"""
+    try:
+        for g in (props.genres if props is not None else None) or ():
+            if isinstance(g, str) and g.startswith(_NCM_ID):
+                sid = g[len(_NCM_ID):].strip()
+                if sid.isdigit():
+                    return sid
+    except Exception:  # noqa: BLE001
+        pass
+    return ""
+
+
 def _secs(v) -> float:
     """TimeSpan -> 秒（pywinrt 映射为 datetime.timedelta；兼容 int ticks）。"""
     if v is None:
@@ -233,6 +249,7 @@ class MediaService(QtCore.QObject):
         title = (props.title if props else "") or ""
         artist = (props.artist if props else "") or ""
         album = (props.album_title if props else "") or ""
+        song_id = _song_id(props)
 
         info = s.get_playback_info()
         playing = bool(info and int(info.playback_status) == _PLAYING)
@@ -267,10 +284,11 @@ class MediaService(QtCore.QObject):
             "has_session": True, "app_id": app_id, "app_name": friendly_name(app_id),
             "title": title, "artist": artist, "album": album, "playing": playing,
             "position": pos, "duration": dur, "stamp": time.monotonic(),
-            "can_prev": can_prev, "can_next": can_next, "song_id": "", "source": "smtc",
+            "can_prev": can_prev, "can_next": can_next, "song_id": song_id, "source": "smtc",
         }
 
-        key = (app_id, title, artist, album)
+        # 有歌曲 id 时一并纳入：同名的不同版本（live / remix）也能换封面
+        key = (app_id, song_id, title, artist, album) if song_id else (app_id, title, artist, album)
         if key != self._track_key:
             self._track_key = key
             self._cover_tries = 0
