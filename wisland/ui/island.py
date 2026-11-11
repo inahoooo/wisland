@@ -369,6 +369,48 @@ class Island(QtWidgets.QWidget):
     def _place_initial(self):
         self._update_geometry(force=True)
 
+    def place_on_edge(self, edge: str | None = None, frac: float = 0.5):
+        """沿吸附边滑到 frac 处（0.5 = 该边居中）；edge=None 表示留在当前边。
+
+        复用 drag 松手后的 snap 管线：along 沿边滑、gap 朝屏幕边收，弹簧静止后
+        _tick 自动切回 anchored，并把 edge / pos 写回配置（见 _tick 的 snap 分支）。"""
+        if self._fs_hidden:
+            return
+        if self.mode == "drag":
+            self._end_drag()                  # 拖动中触发：先收拾状态（含恢复鼠标指针）
+        edge = edge or self.edge
+        if edge not in ("top", "bottom", "left", "right"):
+            return
+        R = self._avail()
+        w, h = max(40.0, self.sw.target), max(24.0, self.sh.target)
+        c = self.body.center() + QtCore.QPointF(self._win_origin)
+        body = QtCore.QRectF(c.x() - w / 2, c.y() - h / 2, w, h)
+        horiz = edge in ("top", "bottom")
+        along0 = c.x() if horiz else c.y()
+        gap0 = self._gap_to(edge, body, self._line(edge))     # 换边时是几百像素，同边时约等于 0
+        if self.neck_edge and self.neck_edge != edge:
+            self._break_neck()                # 换边：旧边的液桥断成小水滴，否则脖子会横跨屏幕
+        self.edge = edge
+        self.pos_frac = clamp(float(frac), 0.0, 1.0)
+        cfg.set("island.edge", self.edge, save=False)
+        cfg.set("island.pos", round(self.pos_frac, 4), save=False)
+        lo, hi = self._along_range(edge, w, h)
+        a = R.left() + self.pos_frac * R.width() if horiz else R.top() + self.pos_frac * R.height()
+        self.along.snap(along0)
+        self.gap.snap(max(-4.0, gap0))
+        self.along.to(clamp(a, lo, hi) if lo <= hi else (lo + hi) / 2, 320, 0.72)
+        self.gap.to(0, 320, 0.55)
+        self.mode = "snap"
+        self._kick()
+
+    def reset_position(self):
+        """重置：回到当前屏幕的上沿、水平居中。"""
+        self.place_on_edge("top", 0.5)
+
+    def center_position(self):
+        """居中：停在当前所在边的居中位置（不换边）。"""
+        self.place_on_edge(None, 0.5)
+
     # ================================================================ 展开 / 收起
     def expanded_size(self) -> tuple[float, float]:
         """打开时的尺寸（按上次停留的页面的高度）。"""
@@ -473,8 +515,16 @@ class Island(QtWidgets.QWidget):
         return
 
     # ================================================================ 拖动
+    def locked(self) -> bool:
+        return bool(cfg.get("island.locked", False))
+
+    def set_locked(self, on: bool):
+        """锁住位置：解开之前按住拖动无效（展开 / 收起 / 悬停都不受影响）。"""
+        cfg.set("island.locked", bool(on))
+        self.lock_changed.emit(bool(on))
+
     def begin_drag(self, gpos: QtCore.QPoint | None = None):
-        if self.mode == "drag" or self.passthrough():
+        if self.mode == "drag" or self.passthrough() or self.locked():
             return
         gpos = QtCore.QPointF(gpos or QtGui.QCursor.pos())
         c = self.body.center() + QtCore.QPointF(self._win_origin)
@@ -1125,8 +1175,10 @@ class Island(QtWidgets.QWidget):
             self.menu_requested.emit(e.globalPosition().toPoint())
 
     def mouseMoveEvent(self, e):
-        # 按住并移动即开始拖动（不需要长按）；固定时不允许拖动
-        if self._press is not None and (e.position() - self._press).manhattanLength() > 4:
+        # 按住并移动即开始拖动（不需要长按）；锁定 / 不动时不允许拖动。
+        # 锁定时在这里就拦住、且不清 _press：否则随后松开不会走单击展开，行为会和平时不一致。
+        if self._press is not None and not self.locked() \
+                and (e.position() - self._press).manhattanLength() > 4:
             self.lp_timer.stop()
             self._press = None
             self.begin_drag(QtGui.QCursor.pos())

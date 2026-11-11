@@ -16,7 +16,8 @@
     "pinned": false,
     "compact_view": "clock",
     "auto_cycle_s": 30,
-    "passthrough": false
+    "passthrough": false,
+    "locked": false
   },
   "hotkeys": {
     "toggle": "Ctrl+Alt+I",

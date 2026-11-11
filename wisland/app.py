@@ -136,7 +136,7 @@ def main():
     from .ui.island import Island
     from .ui.pages.home import HomePage, MessagesPage
     from .ui.pages.info import StocksPage, WeatherPage
-    from .ui.pages.system import ControlsPage, styled_menu
+    from .ui.pages.system import ControlsPage, close_on_outside_click, menu_mark, styled_menu
     from .ui.pages.tools import ClipboardPage, TranslatePage
     from .ui.theme import KIND_COLORS, THEME_NAMES, G, theme
     from .ui.widgets import glyph_pixmap
@@ -386,6 +386,13 @@ def main():
         for mode, label in (("hover", "悬停展开"), ("always", "常驻展开"), ("never", "长关")):
             a = em.addAction(("✓  " if island.expand_mode() == mode else "    ") + label)
             a.triggered.connect(lambda _=False, m=mode: island.set_expand_mode(m))
+        pm = menu.addMenu("位置")
+        pa = pm.addAction(menu_mark(pm, island.locked()) + "锁定")
+        pa.triggered.connect(lambda: island.set_locked(not island.locked()))
+        pa.setToolTip("锁住位置：锁定后按住拖动无效")
+        # 未勾选项用与 "✓  " 等宽的空白，三行文字才左对齐（等数量的半角空格对不齐）
+        pm.addAction(menu_mark(pm, False) + "重置").triggered.connect(island.reset_position)
+        pm.addAction(menu_mark(pm, False) + "居中").triggered.connect(island.center_position)
         a = menu.addAction(("✓  " if island.passthrough() else "    ") + "可穿透")
         a.triggered.connect(lambda: island.set_passthrough(not island.passthrough()))
         a = menu.addAction(("✓  " if island.capture_visible() else "    ") + "参与截图")
@@ -446,6 +453,8 @@ def main():
     tray = QtWidgets.QSystemTrayIcon(QtGui.QIcon(glyph_pixmap(G.APPS, 32, QtGui.QColor("#4f8cff"))), app)
     tray.setToolTip("wisland 灵动岛")
     tmenu = QtWidgets.QMenu()
+    # 托盘菜单同样不抢焦点，得手动挂「点外面就关闭」，否则点别处菜单不会消失
+    close_on_outside_click(tmenu)
     tmenu.aboutToShow.connect(lambda: (tmenu.clear(), tmenu.addAction("展开 / 收起").triggered.connect(island.toggle),
                                        build_menu(tmenu)))
     tray.setContextMenu(tmenu)

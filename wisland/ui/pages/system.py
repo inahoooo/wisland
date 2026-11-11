@@ -2,6 +2,9 @@
 """控制中心（音量 / 亮度 / WiFi / 蓝牙 / Clash Verge）、窗口切换、性能监控。"""
 from __future__ import annotations
 
+import functools
+import itertools
+
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from ...core.bg import run_bg
@@ -22,16 +25,21 @@ def short_node(name: str) -> str:
     return name
 
 
-def _close_on_outside_click(m: QtWidgets.QMenu):
-    """灵动岛不抢焦点，Qt 的"点外面关闭菜单"不会触发；这里轮询鼠标键，点到菜单外就关闭。"""
+def _close_on_outside_click(m: QtWidgets.QMenu, is_down=None):
+    """灵动岛 / 托盘都不抢焦点，Qt 的"点外面关闭菜单"不会触发；这里轮询鼠标键，点到菜单外就关闭。
+
+    is_down 只用于测试：传入一个返回 bool 的函数替掉真实按键查询。"""
     import ctypes
     u32 = ctypes.WinDLL("user32")
+
+    def down() -> bool:
+        if is_down is not None:
+            return bool(is_down())
+        return any(u32.GetAsyncKeyState(k) & 0x8000 for k in (0x01, 0x02, 0x04))
+
     st = {"armed": False}
     t = QtCore.QTimer(m)
     t.setInterval(25)
-
-    def down() -> bool:
-        return any(u32.GetAsyncKeyState(k) & 0x8000 for k in (0x01, 0x02, 0x04))
 
     def tick():
         if not m.isVisible():
@@ -50,6 +58,68 @@ def _close_on_outside_click(m: QtWidgets.QMenu):
     t.timeout.connect(tick)
     m.aboutToShow.connect(lambda: (st.update(armed=False), t.start()))
     m.aboutToHide.connect(t.stop)
+
+
+_MARK = "✓  "                      # 菜单勾选标记（和既有菜单的写法一致）
+
+
+def menu_mark(menu: QtWidgets.QMenu, on: bool) -> str:
+    """菜单项前缀：勾选项给 "✓  "，未勾选项给等宽的空白。
+
+    直接写等数量的空格**对不齐**：`"✓  "` 比 `"    "` 宽约 5px（随字体变），
+    未勾选的项会整体偏左。这里按菜单的实际字体量出标记宽度，再用空白凑到一样宽，
+    这样同一组菜单项的文字左边缘才会齐平（"重置" / "居中" 不会比 "锁定" 靠左）。"""
+    if on:
+        return _MARK
+    menu.ensurePolished()
+    f = menu.font()
+    px = f.pixelSize() if f.pixelSize() > 0 else round(f.pointSizeF() * 96 / 72)
+    return _blank(f.family(), px, _MARK)
+
+
+# 可用的空白字符（从窄到宽）。半角空格 + 几个不同宽度的空格凑得出任意宽度。
+_BLANKS = ("\u200a", "\u2009", "\u2006", "\u2005", "\u2004", " ", "\u2002", "\u2003", "\u3000")
+
+
+@functools.lru_cache(maxsize=32)
+def _blank(family: str, px: int, mark: str) -> str:
+    """凑出一段纯空白，宽度与 mark 相同（按字体度量求，结果缓存）。
+
+    空白字符的宽度是字体的分数，按比例硬算会累积误差，所以把宽度按 1/64 px
+    整数化后搜组合。先用最少的字符数暴力找精确解（常见字体一两次就命中，
+    只花几毫秒）；实在凑不出来才退到等宽近似，不会拖慢菜单打开。"""
+    f = QtGui.QFont()
+    f.setFamily(family)
+    f.setPixelSize(px)                        # 注意 QFont(family, size) 的 size 是磅值，不能直接用
+    fm = QtGui.QFontMetricsF(f)
+    tgt = round(fm.horizontalAdvance(mark) * 64)
+    units = [(c, round(fm.horizontalAdvance(c) * 64)) for c in _BLANKS]
+    units = [(c, w) for c, w in units if w > 0]
+    if not units:
+        return ""
+    # 由短到长枚举组合（最多 4 个字符），命中即返回
+    for n in (1, 2, 3, 4):
+        for combo in itertools.product(units, repeat=n):
+            if sum(w for _, w in combo) == tgt:
+                return "".join(c for c, _ in combo)
+    # 兜底：贪心逼近，误差不超过最宽单位的 1/4
+    out, rem = "", tgt
+    for c, w in sorted(units, key=lambda t: -t[1]):
+        k = rem // w
+        if k:
+            out += c * int(k)
+            rem -= int(k) * w
+    return out
+
+
+def close_on_outside_click(menu: QtWidgets.QMenu) -> QtWidgets.QMenu:
+    """给菜单挂上「点外面就关闭」。返回 menu 方便链式写。
+
+    托盘菜单（QSystemTrayIcon.setContextMenu）也是不抢焦点的窗口，Qt 自带的
+    关闭机制同样不触发 —— 不挂这个，右键托盘图标弹出菜单后点别处菜单不会消失，
+    必须点中某个选项才行。"""
+    _close_on_outside_click(menu)
+    return menu
 
 
 def styled_menu(parent=None) -> QtWidgets.QMenu:
