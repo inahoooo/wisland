@@ -146,6 +146,10 @@ class _RightClickHook:
 
         self._proc = HOOKPROC(proc)
         self.handle = u.SetWindowsHookExW(14, self._proc, k.GetModuleHandleW(None), 0)
+        if not self.handle:
+            # 装不上就说明穿透模式下右键会穿到桌面 —— 不能静默失败，
+            # 否则用户开「可穿透」后连右键菜单都打不开（见 set_passthrough 的处理）
+            self.handle = None
 
     def remove(self):
         if self.handle:
@@ -276,6 +280,7 @@ class Island(QtWidgets.QWidget):
         self._prev_fg = None
         self._registered_hotkeys: dict[int, str] = {}
         self._rhook = _RightClickHook(self)
+        self._hook_check_t = 0.0                  # 钩子看护的上次检查时刻
         self._obs_owner = 0                       # 供 OBS 枚举的隐藏 owner 窗口（见 _make_owner）
         self._mask_rect = None
         self._floor_t: dict = {}
@@ -1100,6 +1105,7 @@ class Island(QtWidgets.QWidget):
         return self.body.adjusted(-4, -4, 4, 4).contains(lp)
 
     def _poll_hover(self):
+        self._watch_hook()
         # 输入框的键盘焦点：切到别的窗口后立即释放，否则会一直保持展开
         if "focus" in self.locks and user32.GetForegroundWindow() != int(self.winId()):
             self._prev_fg = None
@@ -1255,12 +1261,49 @@ class Island(QtWidgets.QWidget):
     def set_passthrough(self, on: bool):
         cfg.set("island.passthrough", bool(on))
         self._apply_passthrough()
+        if on and not self._hook_ok():
+            # 钩子装不上：穿透后左键 / 滚轮 / 右键统统收不到，等于把入口锁死。
+            # 直接退回不穿透，并把配置改回去 —— 宁可丢了穿透，也不能变成点不动。
+            print("无法安装鼠标钩子，暂不能开启「可穿透」")
+            cfg.set("island.passthrough", False)
+            self._apply_passthrough()
+            self.passthrough_changed.emit(False)
+            return
         if on and self.expanded and not self.pinned():
             self.collapse()
         self.passthrough_changed.emit(bool(on))
 
+    def _hook_ok(self) -> bool:
+        """底层鼠标钩子是否可用。装不上就别进穿透模式：那时连右键都收不到。"""
+        if not self.passthrough():
+            return True
+        return bool(self._rhook.handle)
+
+    def _watch_hook(self):
+        """运行中看护：钩子被系统摘掉（超时 / 句柄失效）就重装。
+
+        WH_MOUSE_LL 的回调如果超时，系统会静默卸载钩子；穿透模式下这意味着
+        右键 / 滚轮全部失灵，用户看着岛还在动却点不动任何东西。
+        这里低频检查句柄，失效了立刻重装（重装成功就继续，失败则退出穿透）。"""
+        if not self.passthrough():
+            return
+        now = time.monotonic()
+        if now - getattr(self, "_hook_check_t", 0.0) < 2.0:
+            return
+        self._hook_check_t = now
+        if self._rhook.handle:
+            return                      # 句柄还在：正常
+        # 句柄丢了（回调超时被系统摘除 / 装过但被清空）：重装
+        self._rhook.install()
+        if not self._rhook.handle:
+            # 重装也失败：退出穿透，至少让鼠标能点回来
+            print("鼠标钩子失效且无法重装，已自动关闭「可穿透」")
+            cfg.set("island.passthrough", False)
+            self._apply_passthrough()
+            self.passthrough_changed.emit(False)
+
     def _apply_passthrough(self):
-        """穿透 = 鼠标完全穿过（WS_EX_TRANSPARENT），只靠钩子响应右键。"""
+        """穿透 = 鼠标完全穿过（WS_EX_TRANSPARENT），只靠钩子响应右键 / 滚轮。"""
         hwnd = int(self.winId())
         ex = user32.GetWindowLongPtrW(hwnd, GWL_EXSTYLE)
         on = self.passthrough()
@@ -1269,6 +1312,9 @@ class Island(QtWidgets.QWidget):
         user32.SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex)
         if on:
             self._rhook.install()
+            if not self._rhook.handle:
+                # 钩子装不上 -> 撤掉穿透，保住鼠标入口（调用方 set_passthrough 会提示并改配置）
+                user32.SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex & ~WS_EX_TRANSPARENT)
         else:
             self._rhook.remove()
 
@@ -1426,6 +1472,13 @@ class Island(QtWidgets.QWidget):
         if not self._registered_hotkeys:
             self.register_hotkeys()
         self._apply_passthrough()
+        if self.passthrough() and not self._rhook.handle:
+            # 配置里开着「可穿透」，但钩子装不上：此时鼠标完全穿到桌面，连右键菜单
+            # 都打不开（用户会以为程序卡死）。启动就自愈，退回不穿透并改回配置。
+            print("启动自检：无法安装鼠标钩子，已自动关闭「可穿透」")
+            cfg.set("island.passthrough", False)
+            self._apply_passthrough()
+            self.passthrough_changed.emit(False)
         if self.pinned():
             QtCore.QTimer.singleShot(600, self.expand)
         self.poll.start()
