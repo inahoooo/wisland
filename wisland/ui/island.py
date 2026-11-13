@@ -97,6 +97,7 @@ class _RightClickHook:
         self.island = island
         self.handle = None
         self._proc = None
+        self.last_seen = 0.0          # 最近一次收到鼠标消息的时刻（心跳）
 
     def install(self):
         if self.handle:
@@ -120,6 +121,8 @@ class _RightClickHook:
         isl = self.island
 
         def proc(code, wparam, lparam):
+            if code == 0:
+                self.last_seen = time.monotonic()     # 心跳：钩子还活着、正在收消息
             if code == 0 and wparam == 0x020A:        # WM_MOUSEWHEEL
                 info = ctypes.cast(lparam, ctypes.POINTER(MSLLHOOKSTRUCT)).contents
                 dpr = isl.scr.devicePixelRatio()
@@ -146,6 +149,8 @@ class _RightClickHook:
 
         self._proc = HOOKPROC(proc)
         self.handle = u.SetWindowsHookExW(14, self._proc, k.GetModuleHandleW(None), 0)
+        self.last_seen = time.monotonic()
+        self.island._hook_armed_t = self.last_seen
         if not self.handle:
             # 装不上就说明穿透模式下右键会穿到桌面 —— 不能静默失败，
             # 否则用户开「可穿透」后连右键菜单都打不开（见 set_passthrough 的处理）
@@ -156,6 +161,7 @@ class _RightClickHook:
             self._u.UnhookWindowsHookEx(self.handle)
         self.handle = None
         self._proc = None
+        self.last_seen = 0.0
 
 
 class _Veil(QtWidgets.QWidget):
@@ -281,6 +287,8 @@ class Island(QtWidgets.QWidget):
         self._registered_hotkeys: dict[int, str] = {}
         self._rhook = _RightClickHook(self)
         self._hook_check_t = 0.0                  # 钩子看护的上次检查时刻
+        self._hook_armed_t = time.monotonic()     # 钩子最近一次（重新）安装的时刻
+        self._last_cursor = QtGui.QCursor.pos()   # 用于判断「鼠标是否在动」
         self._obs_owner = 0                       # 供 OBS 枚举的隐藏 owner 窗口（见 _make_owner）
         self._mask_rect = None
         self._floor_t: dict = {}
@@ -448,6 +456,7 @@ class Island(QtWidgets.QWidget):
             tw, th = self.target_size()
             self.content.setGeometry(self._content_rect(tw, th))   # 先隐藏，形状长大后再显示
             if self.passthrough():
+                # 展开 -> 撤掉穿透，面板才能点（_apply_passthrough 内部按 expanded 判断）
                 self._apply_passthrough()
             self._defer_show(self.pages[self.stack.currentIndex()])
             self.expanded_changed.emit(True)
@@ -462,6 +471,7 @@ class Island(QtWidgets.QWidget):
         self.veil.hide()
         self.release_focus()
         if self.passthrough():
+            # 收起 -> 恢复穿透（游戏时鼠标可以点穿胶囊）
             self._apply_passthrough()
         self.locks.discard("pin")
         self.pages[self.stack.currentIndex()].on_hide()
@@ -1280,35 +1290,65 @@ class Island(QtWidgets.QWidget):
         return bool(self._rhook.handle)
 
     def _watch_hook(self):
-        """运行中看护：钩子被系统摘掉（超时 / 句柄失效）就重装。
+        """运行中看护：钩子失效就重装，重装不了就退出穿透。
 
-        WH_MOUSE_LL 的回调如果超时，系统会静默卸载钩子；穿透模式下这意味着
-        右键 / 滚轮全部失灵，用户看着岛还在动却点不动任何东西。
-        这里低频检查句柄，失效了立刻重装（重装成功就继续，失败则退出穿透）。"""
-        if not self.passthrough():
-            return
+        判定依据不是「句柄是否为空」（系统摘除钩子后句柄字段仍是旧值），
+        而是**心跳**：鼠标在动、钩子却很久没收到任何消息，说明它已经不工作了。
+        只在「确实有鼠标活动」时判定，避免静置时误判。
+
+        兜底还有一条：热键 Ctrl+Alt+U 不依赖钩子，能强制关掉穿透（见 app.on_hotkey）。"""
+        if not self.passthrough() or self.expanded:
+            return                          # 展开态本就不穿透，不需要钩子
         now = time.monotonic()
-        if now - getattr(self, "_hook_check_t", 0.0) < 2.0:
+        if now - self._hook_check_t < 2.0:
             return
         self._hook_check_t = now
-        if self._rhook.handle:
-            return                      # 句柄还在：正常
-        # 句柄丢了（回调超时被系统摘除 / 装过但被清空）：重装
-        self._rhook.install()
         if not self._rhook.handle:
-            # 重装也失败：退出穿透，至少让鼠标能点回来
-            print("鼠标钩子失效且无法重装，已自动关闭「可穿透」")
-            cfg.set("island.passthrough", False)
-            self._apply_passthrough()
-            self.passthrough_changed.emit(False)
+            self._rhook.install()
+            if not self._rhook.handle:
+                self._drop_passthrough("鼠标钩子装不上")
+                return
+            self._rhook.last_seen = now
+            return
+        # 句柄非空：用「鼠标在动但没心跳」判断它是否已静默失效
+        last = self._rhook.last_seen or self._hook_armed_t
+        if now - last < 6.0:
+            return                          # 最近有消息，正常
+        if not self._cursor_moved():
+            return                          # 鼠标没动，不能据此判定失效
+        self._rhook.remove()
+        self._rhook.install()
+        if self._rhook.handle:
+            self._rhook.last_seen = now
+            print("鼠标钩子无响应，已重建")
+        else:
+            self._drop_passthrough("鼠标钩子失效且无法重装")
+
+    def _cursor_moved(self) -> bool:
+        """光标相对上次检查是否移动过（用于区分「钩子死了」和「鼠标没动」）。"""
+        p = QtGui.QCursor.pos()
+        moved = p != self._last_cursor
+        self._last_cursor = p
+        return moved
+
+    def _drop_passthrough(self, why: str):
+        """退出穿透并落盘。穿透模式下钩子挂掉等于点不动任何东西，必须能自救。"""
+        print(f"{why}，已自动关闭「可穿透」")
+        cfg.set("island.passthrough", False)
+        self._apply_passthrough()
+        self.passthrough_changed.emit(False)
 
     def _apply_passthrough(self):
-        """穿透 = 鼠标完全穿过（WS_EX_TRANSPARENT），只靠钩子响应右键 / 滚轮。"""
+        """穿透 = 鼠标完全穿过（WS_EX_TRANSPARENT），只靠钩子响应右键 / 滚轮。
+
+        展开时一律不穿透：面板打开就是为了操作，穿透会让热键 / 托盘唤出的面板
+        点不到任何东西（点击直接穿到后面的窗口）。收起后才按配置穿透。
+        """
         hwnd = int(self.winId())
         ex = user32.GetWindowLongPtrW(hwnd, GWL_EXSTYLE)
-        on = self.passthrough()
-        transparent = on
-        ex = (ex | WS_EX_TRANSPARENT) if transparent else (ex & ~WS_EX_TRANSPARENT)
+        # 展开态强制可交互 —— 否则「可穿透」开着时，展开的面板本身是点不到的
+        on = self.passthrough() and not self.expanded
+        ex = (ex | WS_EX_TRANSPARENT) if on else (ex & ~WS_EX_TRANSPARENT)
         user32.SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex)
         if on:
             self._rhook.install()

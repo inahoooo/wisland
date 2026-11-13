@@ -374,6 +374,13 @@ def main():
             ctx.actions.translate_clipboard()
         elif name == "clipboard":
             island.toggle("clip")
+        elif name == "passthrough":
+            # 逃生口：一键关掉「可穿透」。穿透模式下鼠标只剩钩子一条路，
+            # 钩子一挂就再也关不掉了 —— 热键不依赖钩子，是最后能自救的入口。
+            on = not island.passthrough()
+            island.set_passthrough(on)
+            island.activity({"glyph": G.EYE_OFF if not on else G.EYE,
+                             "title": "可穿透已关" if not on else "可穿透已开"}, 1.8)
     island.hotkey.connect(on_hotkey)
 
     # ---------------- 菜单 / 托盘 ----------------

@@ -22,7 +22,8 @@
   "hotkeys": {
     "toggle": "Ctrl+Alt+I",
     "translate": "Ctrl+Alt+J",
-    "clipboard": "Ctrl+Alt+V"
+    "clipboard": "Ctrl+Alt+V",
+    "passthrough": "Ctrl+Alt+U"
   },
   "media": {
     "auto_show": true,

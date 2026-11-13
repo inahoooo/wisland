@@ -40,6 +40,9 @@ DEFAULTS: dict = {
         "toggle": "Ctrl+Alt+I",
         "translate": "Ctrl+Alt+J",
         "clipboard": "Ctrl+Alt+V",
+        # 逃生口：穿透模式下钩子挂了就点不动任何东西，这条热键不依赖钩子，
+        # 用来一键关掉 / 打开「可穿透」。留空 = 不注册。
+        "passthrough": "Ctrl+Alt+U",
     },
     "media": {
         "auto_show": True,           # 开始播放时收起态自动切到音乐（暂停 8 秒后切回）
