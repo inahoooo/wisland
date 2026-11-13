@@ -424,11 +424,25 @@ def main():
         menu.addSeparator()
         menu.addAction("退出 wisland").triggered.connect(app.quit)
 
+    menu_state = {"cur": None}          # 当前打开的菜单（同时只允许一个）
+
     def show_menu(pos):
+        old = menu_state["cur"]
+        if old is not None:
+            # 已经有一个菜单开着：先关掉再开新的，否则右键几次就叠出好几层菜单
+            menu_state["cur"] = None
+            old.close()
+            old.deleteLater()
         m = styled_menu(island)
         build_menu(m)
+        menu_state["cur"] = m
         island.locks.add("menu")
-        m.aboutToHide.connect(lambda: island.locks.discard("menu"))
+
+        def on_hide():
+            island.locks.discard("menu")
+            if menu_state["cur"] is m:
+                menu_state["cur"] = None
+        m.aboutToHide.connect(on_hide)
         m.popup(pos)
     island.menu_requested.connect(show_menu)
     # 导航：「主页」标签放在播放器封面正上方
@@ -457,15 +471,13 @@ def main():
 
     def on_pt(on):
         home.a_pt.set_on(on, None, "可穿透")
-        if on:
-            compact.set_view("pet")            # 穿透时直接显示小形象
-            island._kick()
+        # 只更新按钮状态，不动 compact 的视图：切「可穿透」不应改变收起态显示
+        # （以前这里会 set_view("pet")，开着时间/天气/音乐时一开穿透就变表情）
     island.mode_changed.connect(on_mode)
     island.passthrough_changed.connect(on_pt)
     on_mode(island.expand_mode())
     home.a_pt.set_on(island.passthrough(), None, "可穿透")
-    if island.passthrough():
-        compact.set_view("pet")
+    # 启动时也不因「可穿透」改视图，保持上次的 compact_view（clock / pet / music）
     island.nav.add_right_button(G.GEAR, "设置", lambda: show_menu(QtGui.QCursor.pos()))
 
     tray = QtWidgets.QSystemTrayIcon(QtGui.QIcon(glyph_pixmap(G.APPS, 32, QtGui.QColor("#4f8cff"))), app)
@@ -473,8 +485,18 @@ def main():
     tmenu = QtWidgets.QMenu()
     # 托盘菜单同样不抢焦点，得手动挂「点外面就关闭」，否则点别处菜单不会消失
     close_on_outside_click(tmenu)
-    tmenu.aboutToShow.connect(lambda: (tmenu.clear(), tmenu.addAction("展开 / 收起").triggered.connect(island.toggle),
-                                       build_menu(tmenu)))
+
+    def tray_show():
+        # 托盘菜单和右键菜单共用 build_menu，同一时刻也只留一个
+        cur = menu_state["cur"]
+        if cur is not None:
+            menu_state["cur"] = None
+            cur.close()
+            cur.deleteLater()
+        tmenu.clear()
+        tmenu.addAction("展开 / 收起").triggered.connect(island.toggle)
+        build_menu(tmenu)
+    tmenu.aboutToShow.connect(tray_show)
     tray.setContextMenu(tmenu)
     tray.activated.connect(lambda r: island.toggle() if r == QtWidgets.QSystemTrayIcon.ActivationReason.Trigger else None)
     tray.show()
