@@ -97,7 +97,7 @@ class _RightClickHook:
         self.island = island
         self.handle = None
         self._proc = None
-        self.last_seen = 0.0          # 最近一次收到鼠标消息的时刻（心跳）
+
 
     def install(self):
         if self.handle:
@@ -121,8 +121,6 @@ class _RightClickHook:
         isl = self.island
 
         def proc(code, wparam, lparam):
-            if code == 0:
-                self.last_seen = time.monotonic()     # 心跳：钩子还活着、正在收消息
             if code == 0 and wparam == 0x020A:        # WM_MOUSEWHEEL
                 info = ctypes.cast(lparam, ctypes.POINTER(MSLLHOOKSTRUCT)).contents
                 dpr = isl.scr.devicePixelRatio()
@@ -149,8 +147,6 @@ class _RightClickHook:
 
         self._proc = HOOKPROC(proc)
         self.handle = u.SetWindowsHookExW(14, self._proc, k.GetModuleHandleW(None), 0)
-        self.last_seen = time.monotonic()
-        self.island._hook_armed_t = self.last_seen
         if not self.handle:
             # 装不上就说明穿透模式下右键会穿到桌面 —— 不能静默失败，
             # 否则用户开「可穿透」后连右键菜单都打不开（见 set_passthrough 的处理）
@@ -161,7 +157,6 @@ class _RightClickHook:
             self._u.UnhookWindowsHookEx(self.handle)
         self.handle = None
         self._proc = None
-        self.last_seen = 0.0
 
 
 class _Veil(QtWidgets.QWidget):
@@ -287,8 +282,6 @@ class Island(QtWidgets.QWidget):
         self._registered_hotkeys: dict[int, str] = {}
         self._rhook = _RightClickHook(self)
         self._hook_check_t = 0.0                  # 钩子看护的上次检查时刻
-        self._hook_armed_t = time.monotonic()     # 钩子最近一次（重新）安装的时刻
-        self._last_cursor = QtGui.QCursor.pos()   # 用于判断「鼠标是否在动」
         self._obs_owner = 0                       # 供 OBS 枚举的隐藏 owner 窗口（见 _make_owner）
         self._mask_rect = None
         self._floor_t: dict = {}
@@ -1290,46 +1283,28 @@ class Island(QtWidgets.QWidget):
         return bool(self._rhook.handle)
 
     def _watch_hook(self):
-        """运行中看护：钩子失效就重装，重装不了就退出穿透。
+        """运行中看护：只在「钩子确实装不上」时处理，**不做存活探测**。
 
-        判定依据不是「句柄是否为空」（系统摘除钩子后句柄字段仍是旧值），
-        而是**心跳**：鼠标在动、钩子却很久没收到任何消息，说明它已经不工作了。
-        只在「确实有鼠标活动」时判定，避免静置时误判。
+        早期版本试过用心跳（last_seen）判断钩子是否还活着，这是个错误设计：
+        这个钩子只处理右键和滚轮，不操作时 last_seen 根本不更新，于是鼠标静止
+        几秒后光标一动就被判成「失效」并重建 —— 而重建期间钩子被卸载，
+        右键 / 滚轮全丢。日志里刷屏 114 次「已重建」，用户看到的就是点不动。
 
-        兜底还有一条：热键 Ctrl+Alt+U 不依赖钩子，能强制关掉穿透（见 app.on_hotkey）。"""
+        钩子一旦装上就稳定持有，不再去猜它死活。真正的兜底是：
+        - 装不上 -> 立刻退出穿透（_drop_passthrough），不让窗口处于半死状态
+        - 万一运行时真的失效 -> 热键 Ctrl+Alt+U 不依赖钩子，能强制关掉穿透
+          （见 app.on_hotkey；这是用户确认过的逃生路径）"""
         if not self.passthrough() or self.expanded:
             return                          # 展开态本就不穿透，不需要钩子
+        if self._rhook.handle:
+            return                          # 已装好：保持不动
         now = time.monotonic()
         if now - self._hook_check_t < 2.0:
             return
         self._hook_check_t = now
-        if not self._rhook.handle:
-            self._rhook.install()
-            if not self._rhook.handle:
-                self._drop_passthrough("鼠标钩子装不上")
-                return
-            self._rhook.last_seen = now
-            return
-        # 句柄非空：用「鼠标在动但没心跳」判断它是否已静默失效
-        last = self._rhook.last_seen or self._hook_armed_t
-        if now - last < 6.0:
-            return                          # 最近有消息，正常
-        if not self._cursor_moved():
-            return                          # 鼠标没动，不能据此判定失效
-        self._rhook.remove()
         self._rhook.install()
-        if self._rhook.handle:
-            self._rhook.last_seen = now
-            print("鼠标钩子无响应，已重建")
-        else:
-            self._drop_passthrough("鼠标钩子失效且无法重装")
-
-    def _cursor_moved(self) -> bool:
-        """光标相对上次检查是否移动过（用于区分「钩子死了」和「鼠标没动」）。"""
-        p = QtGui.QCursor.pos()
-        moved = p != self._last_cursor
-        self._last_cursor = p
-        return moved
+        if not self._rhook.handle:
+            self._drop_passthrough("鼠标钩子装不上")
 
     def _drop_passthrough(self, why: str):
         """退出穿透并落盘。穿透模式下钩子挂掉等于点不动任何东西，必须能自救。"""
