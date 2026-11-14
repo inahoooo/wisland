@@ -501,6 +501,33 @@ def main():
     tray.activated.connect(lambda r: island.toggle() if r == QtWidgets.QSystemTrayIcon.ActivationReason.Trigger else None)
     tray.show()
 
+    # ---------------- 托盘图标可靠性 ----------------
+    # 开机自启（HKCU\Run → wscript wisland.vbs）时，Shell 的通知区域可能还没准备好，
+    # QSystemTrayIcon 的 Shell_NotifyIcon 会静默失败，图标从此不出现 —— 用户看到的就是
+    # 「托盘图标没了」。Qt 只在收到 TaskbarCreated 时才重建，而 explorer 若正常启动
+    # 根本不会广播这条消息，于是永远救不回来。
+    #
+    # 两条加固：
+    # 1. 启动后头一分钟每 5 秒 hide/show 一次，逼它重新注册（早期失败多半能救回来）
+    # 2. 监听 TaskbarCreated（explorer 重启），收到就重建图标
+    def _tray_rebuild():
+        tray.hide()
+        tray.show()
+
+    _tray_retries = {"n": 0}
+
+    def _tray_retry():
+        if tray.isSystemTrayAvailable() and not tray.isVisible():
+            _tray_rebuild()
+        _tray_retries["n"] += 1
+        if _tray_retries["n"] >= 12:            # 1 分钟后停
+            _tray_timer.stop()
+    # 前 60 秒：每 5 秒确认一次图标在（失败会重注册）
+    _tray_timer = QtCore.QTimer(app, interval=5000, timeout=_tray_retry)
+    _tray_timer.start()
+    # explorer 重启后通知区域是空的，必须重建图标
+    island.taskbar_created.connect(_tray_rebuild)
+
     # ---------------- 收起态：时间天气与小形象每隔几十秒自动轮换 ----------------
     def auto_cycle():
         if island.expanded or island.passthrough() or compact.view not in ("clock", "pet"):

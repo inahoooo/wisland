@@ -97,6 +97,7 @@ class _RightClickHook:
         self.island = island
         self.handle = None
         self._proc = None
+        self.last_seen = 0.0          # 最近一次收到任何鼠标消息的时刻（WH_MOUSE_LL 收所有鼠标消息）
 
 
     def install(self):
@@ -121,6 +122,11 @@ class _RightClickHook:
         isl = self.island
 
         def proc(code, wparam, lparam):
+            if code == 0:
+                # WH_MOUSE_LL 会收到**所有**鼠标消息（含 WM_MOUSEMOVE），
+                # 所以只要系统钩子链还在工作，鼠标一动这里就会刷新。
+                # 它是「钩子是否真的活着」的唯一可信依据。
+                self.last_seen = time.monotonic()
             if code == 0 and wparam == 0x020A:        # WM_MOUSEWHEEL
                 info = ctypes.cast(lparam, ctypes.POINTER(MSLLHOOKSTRUCT)).contents
                 dpr = isl.scr.devicePixelRatio()
@@ -147,6 +153,7 @@ class _RightClickHook:
 
         self._proc = HOOKPROC(proc)
         self.handle = u.SetWindowsHookExW(14, self._proc, k.GetModuleHandleW(None), 0)
+        self.last_seen = time.monotonic()
         if not self.handle:
             # 装不上就说明穿透模式下右键会穿到桌面 —— 不能静默失败，
             # 否则用户开「可穿透」后连右键菜单都打不开（见 set_passthrough 的处理）
@@ -157,6 +164,7 @@ class _RightClickHook:
             self._u.UnhookWindowsHookEx(self.handle)
         self.handle = None
         self._proc = None
+        self.last_seen = 0.0
 
 
 class _Veil(QtWidgets.QWidget):
@@ -228,6 +236,7 @@ class Island(QtWidgets.QWidget):
     pin_changed = QtCore.Signal(bool)
     mode_changed = QtCore.Signal(str)
 
+    taskbar_created = QtCore.Signal()           # explorer 重建通知区域（托盘图标需重注册）
     play_pause_requested = QtCore.Signal()      # 收起态音乐视图的播放 / 暂停键
     prev_requested = QtCore.Signal()            # 收起态音乐视图的上一首
     next_requested = QtCore.Signal()            # 收起态音乐视图的下一首
@@ -293,6 +302,7 @@ class Island(QtWidgets.QWidget):
         self._bd_prev = None
         self._bd_fade_t0 = 0.0
         self._shell_msg = 0
+        self._taskbar_msg = 0                     # "TaskbarCreated"：explorer 重建通知区域
         self._dirty = QtCore.QRect()
 
         # ---- 展开内容 ----
@@ -1277,9 +1287,16 @@ class Island(QtWidgets.QWidget):
         self.passthrough_changed.emit(bool(on))
 
     def _hook_ok(self) -> bool:
-        """底层鼠标钩子是否可用。装不上就别进穿透模式：那时连右键都收不到。"""
+        """底层鼠标钩子是否可用。装不上就别进穿透模式：那时连右键都收不到。
+
+        **展开态必须直接判 OK**：_apply_passthrough 里「展开一律不穿透」，
+        此时会主动 remove() 钩子，handle 必然是 None。若这里按 handle 判，
+        展开面板里点「可穿透」会永远失败并弹回关闭（日志刷「无法安装鼠标钩子」）。
+        这种状态下本来就不需要钩子，等收起时 _watch_hook / _apply_passthrough 会补装。"""
         if not self.passthrough():
             return True
+        if self.expanded:
+            return True                 # 展开态不穿透，不需要钩子
         return bool(self._rhook.handle)
 
     def _watch_hook(self):
@@ -1484,6 +1501,8 @@ class Island(QtWidgets.QWidget):
         if not self._shell_msg:
             self._shell_msg = user32.RegisterWindowMessageW("SHELLHOOK")
             user32.RegisterShellHookWindow(hwnd)
+        if not self._taskbar_msg:
+            self._taskbar_msg = user32.RegisterWindowMessageW("TaskbarCreated")
         if not self._registered_hotkeys:
             self.register_hotkeys()
         self._apply_passthrough()
@@ -1526,6 +1545,10 @@ class Island(QtWidgets.QWidget):
             elif self._shell_msg and msg.message == self._shell_msg:
                 if int(msg.wParam) == HSHELL_FLASH:
                     self.flash.emit(int(msg.lParam or 0))
+            elif self._taskbar_msg and msg.message == self._taskbar_msg:
+                # explorer 重启 → 通知区域重建，之前注册的托盘图标全没了。
+                # 交给 app 层重建（灵动岛自己不管托盘，但它是收这条消息的窗口）。
+                self.taskbar_created.emit()
         except Exception:  # noqa: BLE001
             pass
         return False, 0
