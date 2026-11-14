@@ -375,12 +375,15 @@ def main():
         elif name == "clipboard":
             island.toggle("clip")
         elif name == "passthrough":
-            # 逃生口：一键关掉「可穿透」。穿透模式下鼠标只剩钩子一条路，
-            # 钩子一挂就再也关不掉了 —— 热键不依赖钩子，是最后能自救的入口。
-            on = not island.passthrough()
-            island.set_passthrough(on)
-            island.activity({"glyph": G.EYE_OFF if not on else G.EYE,
-                             "title": "可穿透已关" if not on else "可穿透已开"}, 1.8)
+            # 穿透模式下的主入口：临时解除穿透，让鼠标能正常点岛。
+            # 不依赖 WH_MOUSE_LL 钩子 —— 钩子会因系统原因静默失效，
+            # 而热键走的是 RegisterHotKey，可靠得多。
+            if island.passthrough():
+                island.hold_passthrough(not island._pt_hold)
+            else:
+                # 没开穿透时，这个热键就是普通的开关
+                island.set_passthrough(True)
+                island.activity({"glyph": G.EYE, "title": "可穿透已开"}, 1.6)
     island.hotkey.connect(on_hotkey)
 
     # ---------------- 菜单 / 托盘 ----------------
@@ -517,7 +520,9 @@ def main():
     _tray_retries = {"n": 0}
 
     def _tray_retry():
-        if tray.isSystemTrayAvailable() and not tray.isVisible():
+        # 不能用 tray.isVisible() 判断：Shell_NotifyIcon 失败时 Qt 的可见标志仍是 True，
+        # 那样条件永远不成立、重试形同虚设。这里无条件重建（hide/show 代价很小）。
+        if tray.isSystemTrayAvailable():
             _tray_rebuild()
         _tray_retries["n"] += 1
         if _tray_retries["n"] >= 12:            # 1 分钟后停

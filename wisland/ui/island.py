@@ -291,6 +291,7 @@ class Island(QtWidgets.QWidget):
         self._registered_hotkeys: dict[int, str] = {}
         self._rhook = _RightClickHook(self)
         self._hook_check_t = 0.0                  # 钩子看护的上次检查时刻
+        self._pt_hold = False                     # 热键临时解除穿透（给鼠标一个操作窗口）
         self._obs_owner = 0                       # 供 OBS 枚举的隐藏 owner 窗口（见 _make_owner）
         self._mask_rect = None
         self._floor_t: dict = {}
@@ -1272,19 +1273,29 @@ class Island(QtWidgets.QWidget):
         return bool(cfg.get("island.passthrough", False))
 
     def set_passthrough(self, on: bool):
+        """开关「可穿透」。不再因钩子装不上而拒绝 —— 钩子只是加速器，
+        真正的操作入口是热键 hold_passthrough()（临时解除穿透）。"""
         cfg.set("island.passthrough", bool(on))
+        self._pt_hold = False
         self._apply_passthrough()
-        if on and not self._hook_ok():
-            # 钩子装不上：穿透后左键 / 滚轮 / 右键统统收不到，等于把入口锁死。
-            # 直接退回不穿透，并把配置改回去 —— 宁可丢了穿透，也不能变成点不动。
-            print("无法安装鼠标钩子，暂不能开启「可穿透」")
-            cfg.set("island.passthrough", False)
-            self._apply_passthrough()
-            self.passthrough_changed.emit(False)
-            return
         if on and self.expanded and not self.pinned():
             self.collapse()
         self.passthrough_changed.emit(bool(on))
+
+    def hold_passthrough(self, hold: bool = True):
+        """穿透模式下临时解除穿透，让鼠标能正常操作（热键调用）。
+
+        这是「可穿透」唯一可靠的逃生口：不依赖 WH_MOUSE_LL 钩子。
+        钩子挂掉 / 装不上时，用户按热键就能拿回鼠标，再点岛右键或用菜单关掉穿透。"""
+        if not self.passthrough():
+            return
+        if self._pt_hold == hold:
+            return
+        self._pt_hold = hold
+        self._apply_passthrough()
+        if hold:
+            self.activity({"glyph": G.EYE, "title": "已临时解除穿透", "sub": "再按一次恢复"}, 2.0)
+        self._kick()
 
     def _hook_ok(self) -> bool:
         """底层鼠标钩子是否可用。装不上就别进穿透模式：那时连右键都收不到。
@@ -1338,15 +1349,16 @@ class Island(QtWidgets.QWidget):
         """
         hwnd = int(self.winId())
         ex = user32.GetWindowLongPtrW(hwnd, GWL_EXSTYLE)
-        # 展开态强制可交互 —— 否则「可穿透」开着时，展开的面板本身是点不到的
-        on = self.passthrough() and not self.expanded
+        # 三种情况不穿透：
+        #   expanded      —— 面板要能点
+        #   _pt_hold      —— 热键临时解除（给鼠标一个操作窗口）
+        on = self.passthrough() and not self.expanded and not self._pt_hold
         ex = (ex | WS_EX_TRANSPARENT) if on else (ex & ~WS_EX_TRANSPARENT)
         user32.SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex)
         if on:
+            # 钩子只是「顺手拦截右键 / 滚轮」的加速器，装不上也不影响可用性：
+            # 热键 Ctrl+Alt+U 可以随时临时解除穿透去用鼠标。
             self._rhook.install()
-            if not self._rhook.handle:
-                # 钩子装不上 -> 撤掉穿透，保住鼠标入口（调用方 set_passthrough 会提示并改配置）
-                user32.SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex & ~WS_EX_TRANSPARENT)
         else:
             self._rhook.remove()
 
@@ -1507,12 +1519,10 @@ class Island(QtWidgets.QWidget):
             self.register_hotkeys()
         self._apply_passthrough()
         if self.passthrough() and not self._rhook.handle:
-            # 配置里开着「可穿透」，但钩子装不上：此时鼠标完全穿到桌面，连右键菜单
-            # 都打不开（用户会以为程序卡死）。启动就自愈，退回不穿透并改回配置。
-            print("启动自检：无法安装鼠标钩子，已自动关闭「可穿透」")
-            cfg.set("island.passthrough", False)
-            self._apply_passthrough()
-            self.passthrough_changed.emit(False)
+            # 钩子没装上：仍保留穿透（用户要的是点击透传），但提示一下
+            # 逃生方式 —— 热键可以临时解除穿透，不依赖钩子。
+            print("提示：「可穿透」已开启但鼠标钩子不可用；"
+                  "按 Ctrl+Alt+U 可临时解除穿透用鼠标操作")
         if self.pinned():
             QtCore.QTimer.singleShot(600, self.expand)
         self.poll.start()
