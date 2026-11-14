@@ -7,6 +7,7 @@ import sys
 import time
 import traceback
 import winreg
+from pathlib import Path
 from types import SimpleNamespace
 
 from PySide6 import QtCore, QtGui, QtWidgets
@@ -108,6 +109,166 @@ def set_autostart(on: bool):
                 pass
 
 
+# ================================================================ 单实例锁
+# 只用 QLockFile 是不够的：它只能回答「锁文件在不在」，不能回答「那个进程还活着吗」。
+# 进程若是被外因弄死（实测过：进程 45 线程活着，但岛窗口被销毁，锁仍被它持有），
+# 之后每次启动都只会打印「wisland 已在运行」然后退出，用户看到的就是双击毫无反应。
+# 所以锁里要同时记录 pid 和窗口句柄，重建时据此判断：
+#   pid 还在 且 岛窗口还在 → 真的是重复启动，退出
+#   pid 还在 但 岛窗口没了 → 空转的僵尸，杀掉它抢锁
+#   pid 不在了            → 陈旧锁，直接抢
+def _pid_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        import ctypes
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        h = k32.OpenProcess(0x1000, False, int(pid))     # PROCESS_QUERY_LIMITED_INFORMATION
+        if not h:
+            return False
+        try:
+            code = ctypes.c_ulong()
+            if not k32.GetExitCodeProcess(h, ctypes.byref(code)):
+                return True
+            return code.value == 259                        # STILL_ACTIVE
+        finally:
+            k32.CloseHandle(h)
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _hwnd_file(lock) -> Path:
+    """hwnd 记录文件跟着锁文件走，保证两者永远指向同一个实例（测试时可以把锁换到临时目录）。"""
+    return Path(lock.fileName()).with_suffix(".hwnd")
+
+
+def _lock_holder(lock) -> tuple[int, int]:
+    """读锁持有者的 (pid, 岛窗口句柄)。
+    pid 在 QLockFile 的锁文件第 1 行；hwnd 单独记在旁挂的 .hwnd 文件里，
+    不去动 QLockFile 自己的格式（它靠行数校验锁的有效性，多加行会被当成损坏锁）。"""
+    pid = 0
+    try:
+        lines = Path(lock.fileName()).read_text(encoding="utf-8").splitlines()
+        if lines and lines[0].strip().isdigit():
+            pid = int(lines[0].strip())
+    except OSError:
+        pass
+    hwnd = 0
+    try:
+        hwnd = int(_hwnd_file(lock).read_text(encoding="utf-8").strip() or 0)
+    except (OSError, ValueError):
+        pass
+    return pid, hwnd
+
+
+def _acquire_lock(lock) -> bool:
+    """抢单实例锁。抢不到时判断持有者是不是已成僵尸（pid 在但窗口没了）。"""
+    if lock.tryLock(100):
+        return True
+    pid, hwnd = _lock_holder(lock)
+    if not _pid_alive(pid):
+        print(f"检测到陈旧锁（pid {pid} 已不存在），清理后继续")
+    else:
+        if hwnd and _window_exists(hwnd):
+            print("wisland 已在运行（已把现有的灵动岛提到最前）")
+            _nudge_existing(hwnd)
+            return False
+        # pid 活着但拿不出岛窗口 —— 空转的僵尸实例，谁也用不了它
+        print(f"检测到空转实例（pid {pid} 还活着但岛窗口 {hwnd} 已不存在），终止它并接管")
+        _kill_pid(pid)
+    for _ in range(20):
+        try:
+            Path(lock.fileName()).unlink()
+        except OSError:
+            pass
+        time.sleep(0.05)
+        if lock.tryLock(100):
+            return True
+    print("wisland 已在运行（锁被占用且无法接管）")
+    return False
+
+
+def _window_visible(hwnd: int) -> bool:
+    try:
+        import ctypes
+        return bool(ctypes.WinDLL("user32", use_last_error=True).IsWindowVisible(int(hwnd)))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _window_exists(hwnd: int) -> bool:
+    try:
+        import ctypes
+        return bool(ctypes.WinDLL("user32", use_last_error=True).IsWindow(int(hwnd)))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _kill_pid(pid: int) -> None:
+    if pid <= 0 or pid == os.getpid():
+        return
+    try:
+        import ctypes
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        h = k32.OpenProcess(0x0001, False, int(pid))         # PROCESS_TERMINATE
+        if h:
+            try:
+                k32.TerminateProcess(h, 1)
+            finally:
+                k32.CloseHandle(h)
+    except Exception:  # noqa: BLE001
+        pass
+    for _ in range(40):
+        if not _pid_alive(pid):
+            return
+        time.sleep(0.05)
+
+
+def _nudge_existing(hwnd: int) -> None:
+    """已经有一个正常实例在跑：把它的岛提到最前，别让用户觉得「双击没反应」。
+    岛带 WS_EX_NOACTIVATE，抢焦点会被系统拒绝，所以只做置顶。
+    窗口若正被全屏自动隐藏，就不要强行显示 —— 那会破坏它自己的隐藏状态。"""
+    try:
+        import ctypes
+        u32 = ctypes.WinDLL("user32", use_last_error=True)
+        if not u32.IsWindowVisible(int(hwnd)):
+            return
+        u32.SetWindowPos.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int, ctypes.c_int,
+                                     ctypes.c_int, ctypes.c_int, ctypes.c_uint]
+        u32.SetWindowPos(int(hwnd), -1, 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010)   # HWND_TOPMOST
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _island_alive(island) -> bool:
+    """岛窗口还在不在、还可不可见。销毁和「被外力隐藏」都算不正常 —— 后者同样救不回来：
+    quitOnLastWindowClosed=False，窗口一旦隐藏就没人再把它显示出来，托盘图标也没有，
+    用户只能看到「有进程、但什么都没有」。全屏自动隐藏是唯一合法的隐藏态。
+
+    用原生 IsWindowVisible 而不是 Qt 的 isVisible()：后者只看 Qt 自己的状态标志，
+    窗口被外部 ShowWindow(SW_HIDE) 隐藏时它仍然是 True（实测）。"""
+    try:
+        hwnd = int(island.winId())
+    except (RuntimeError, ValueError, AttributeError):
+        return False                                  # C++ 对象已被销毁
+    if not hwnd or not _window_exists(hwnd):
+        return False
+    try:
+        if getattr(island, "_fs_hidden", False):
+            return True                               # 全屏自动隐藏，合法的隐藏
+    except RuntimeError:
+        return False
+    return _window_visible(hwnd)
+
+
+def write_hwnd(lock, hwnd: int) -> None:
+    """把岛窗口句柄记下来，供下一次启动判断「持有者还有没有界面」。"""
+    try:
+        _hwnd_file(lock).write_text(str(int(hwnd)), encoding="utf-8")
+    except OSError:
+        pass
+
+
 def main():
     QtCore.QCoreApplication.setAttribute(QtCore.Qt.ApplicationAttribute.AA_DontCreateNativeWidgetSiblings)
     app = QtWidgets.QApplication(sys.argv)
@@ -117,8 +278,7 @@ def main():
 
     lock = QtCore.QLockFile(str(DATA_DIR / "wisland.lock"))
     lock.setStaleLockTime(0)
-    if not lock.tryLock(100):
-        print("wisland 已在运行")
+    if not _acquire_lock(lock):
         return 0
     fix_autostart()
 
@@ -556,6 +716,30 @@ def main():
 
     # ---------------- 启动 ----------------
     island.show()
+    # 记下岛窗口句柄：下次启动时用它判断「占着锁的进程还有没有界面」
+    write_hwnd(lock, int(island.winId()))
+
+    # ---------------- 自我看护：岛窗口没了就主动退出 ----------------
+    # 实测过一次严重故障：进程 45 个线程全部正常、锁仍被它持有，但岛窗口已经不在
+    # 任何窗口枚举里（不是隐藏 —— 隐藏的 Tool 窗口照样枚举得到），此后每次启动都
+    # 只打印「wisland 已在运行」就退出，用户看到的就是双击毫无反应、托盘也没有图标。
+    # 与其让一个没有界面的进程继续占着锁，不如自己退出，把位置让给下一次启动。
+    _self_check = {"miss": 0}
+
+    def _watch_self():
+        if _self_check["miss"] < 0:
+            return
+        if _island_alive(island):
+            _self_check["miss"] = 0
+            return
+        _self_check["miss"] += 1
+        # 连续 3 次（约 6 秒）都不正常才退出，避免全屏恢复瞬间的误杀
+        if _self_check["miss"] >= 3:
+            _self_check["miss"] = -1          # 只触发一次
+            print("岛窗口已不存在，wisland 自行退出以免占着单实例锁")
+            app.quit()
+    _self_timer = QtCore.QTimer(app, interval=2000, timeout=_watch_self)
+    _self_timer.start()
     for s in (ctx.media, ctx.audio, ctx.brightness, ctx.radio, ctx.windows, ctx.notify, ctx.stocks,
               ctx.weather, ctx.clash, ctx.translate, ctx.clipboard, ctx.mailcheck, ctx.learn,
               ctx.agentwatch):
